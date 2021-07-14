@@ -19,7 +19,7 @@ add_project_arguments('-Wno-unused-function', language: 'c')
 threads = dependency('threads')
 
 pipewire = dependency('libpipewire-0.3')
-spa = dependency('libspa-0.1')
+spa = dependency('libspa-0.2')
 
 wayland_client = dependency('wayland-client')
 wayland_protos = dependency('wayland-protocols', version: '>=1.14')

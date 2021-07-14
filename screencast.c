@@ -20,14 +20,17 @@
 
 //TODO: stop hardcoding
 #define HW_DEVICE "/dev/dri/renderD128"
-#define WIDTH 1600
-#define HEIGHT 900
-#define FRAMERATE 25
+#define WIDTH 1920
+#define HEIGHT 1080
+#define FRAMERATE 30
 #define ALIGN 16
 
 //Disableable logger
-//#define logger(...) printf(__VA_ARGS__)
+// #define logger(...) printf(__VA_ARGS__)
 #define logger(...)
+
+uint32_t _size;
+uint32_t _stride;
 
 struct frame_object {
   int32_t fd;
@@ -177,6 +180,8 @@ static void pw_on_event(void *data, uint64_t expirations){
 	
   uint64_t i;
   for(i=0; i<1; i++){//i<ctx->frame_set.num_objects; i++){
+	  	pthread_mutex_lock(&ctx->lock);
+
     d[i].type = SPA_DATA_DmaBuf;
 	  d[i].flags = SPA_DATA_FLAG_READABLE | SPA_DATA_FLAG_DYNAMIC;
 	  d[i].fd = ctx->frame_set.frame_objects[i]->fd;
@@ -186,6 +191,9 @@ static void pw_on_event(void *data, uint64_t expirations){
 		d[i].chunk->stride = ctx->frame_set.frame_objects[i]->stride;
 		d[i].chunk->offset = ctx->frame_set.frame_objects[i]->offset;
 		d[i].chunk->flags = 0;
+		pthread_mutex_unlock(&ctx->lock);
+
+
 
 		logger("************** \n");
 		logger("pointer: %p\n", d[i].data);
@@ -233,12 +241,13 @@ static void pw_on_stream_add_buffer(void *data, struct pw_buffer *buffer){
 
 	d = buf->datas;
 
+	pthread_mutex_lock(&ctx->lock);
 	d[0].type = SPA_DATA_DmaBuf;
   d[0].flags = SPA_DATA_FLAG_READABLE | SPA_DATA_FLAG_DYNAMIC;
 	d[0].fd = ctx->frame_set.frame_objects[0]->fd;
 	d[0].mapoffset = 0;
 	d[0].maxsize = ctx->frame_set.frame_objects[0]->size;
-	
+	pthread_mutex_unlock(&ctx->lock);
 }
 
 static void pw_on_stream_remove_buffer(void *data, struct pw_buffer *buffer){
@@ -267,10 +276,10 @@ static void pw_on_stream_param_changed(void *data, uint32_t id, const struct spa
 		SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers,
 		SPA_PARAM_BUFFERS_buffers, SPA_POD_CHOICE_RANGE_Int(1, 1, 32),
 		SPA_PARAM_BUFFERS_blocks,  SPA_POD_Int(1),
-		SPA_PARAM_BUFFERS_size,    SPA_POD_Int(ctx->frame_set.frame_objects[0]->size),
-		SPA_PARAM_BUFFERS_stride,  SPA_POD_Int(ctx->frame_set.frame_objects[0]->stride),
+		SPA_PARAM_BUFFERS_size,    SPA_POD_Int(_size),
+		SPA_PARAM_BUFFERS_stride,  SPA_POD_Int(_stride),
 		SPA_PARAM_BUFFERS_align,   SPA_POD_Int(ALIGN));
-
+	
 	params[1] = spa_pod_builder_add_object(&b,
 		SPA_TYPE_OBJECT_ParamMeta, SPA_PARAM_Meta,
 		SPA_PARAM_META_type, SPA_POD_Id(SPA_META_Header),
@@ -288,8 +297,8 @@ static const struct pw_stream_events pw_events = {
 	.remove_buffer = pw_on_stream_remove_buffer,
 };
 
-void *pw_start(void *data){
-
+void pw_setup(void *data)
+{
   struct screencast_context *ctx = data;
 	
   const struct spa_pod *params[1];
@@ -352,6 +361,12 @@ void *pw_start(void *data){
 			  PW_STREAM_FLAG_DRIVER |
 			  PW_STREAM_FLAG_ALLOC_BUFFERS,
 			  params, 1);
+}
+
+void *pw_start(void *data){
+
+  struct screencast_context *ctx = data;
+
 
 	/* run the loop, this will trigger the callbacks */
 	pw_main_loop_run(ctx->loop);
@@ -370,16 +385,24 @@ void *pw_start(void *data){
 //
 
 static void wlr_frame_free(struct screencast_context *ctx) {
-	
-	for (uint64_t i = 0; i < ctx->frame_set.num_objects; ++i) {
-		close(ctx->frame_set.frame_objects[i]->fd);
-		free(ctx->frame_set.frame_objects[i]);
+	if (ctx->frame_set.frame_objects)
+	{
+		for (uint64_t i = 0; i < ctx->frame_set.num_objects; ++i) {
+			if (ctx->frame_set.frame_objects[i] && ctx->frame_set.frame_objects[i]->fd)
+			{
+				close(ctx->frame_set.frame_objects[i]->fd);
+				free(ctx->frame_set.frame_objects[i]);
+			}
+
+		}
+		free(ctx->frame_set.frame_objects);
 	}
-	free(ctx->frame_set.frame_objects);
+
+	ctx->frame_set.frame_objects = 0;
 
 	zwlr_export_dmabuf_frame_v1_destroy(ctx->frame);
 	logger("wlr frame_freed\n");
-	pthread_mutex_unlock(&ctx->lock);
+	pthread_mutex_lock(&ctx->lock);
 
 }
 
@@ -389,7 +412,6 @@ static void wlr_frame_start(void *data, struct zwlr_export_dmabuf_frame_v1 *fram
 		uint32_t mod_high, uint32_t mod_low, uint32_t num_objects) {
   
   struct screencast_context *ctx = data;
-	pthread_mutex_lock(&ctx->lock);
   logger("wlr frame_start\n");
 	logger("modifier: %lx\n", ((uint64_t)mod_high << 32) | mod_low);
 
@@ -400,7 +422,7 @@ static void wlr_frame_start(void *data, struct zwlr_export_dmabuf_frame_v1 *fram
     ctx->frame_set.frame_objects[i] = malloc(sizeof(struct frame_object));
   }
   ctx->frame_set.num_objects = num_objects;
-	pthread_mutex_unlock(&ctx->lock);
+	// pthread_mutex_unlock(&ctx->lock);
 
 }
 
@@ -409,7 +431,7 @@ static void wlr_frame_object(void *data, struct zwlr_export_dmabuf_frame_v1 *fra
 		uint32_t stride, uint32_t plane_index) {
   
   struct screencast_context *ctx = data;
-	pthread_mutex_lock(&ctx->lock);
+	// pthread_mutex_lock(&ctx->lock);
 	logger("wlr frame_object\n");
 
 
@@ -417,6 +439,12 @@ static void wlr_frame_object(void *data, struct zwlr_export_dmabuf_frame_v1 *fra
   ctx->frame_set.frame_objects[index]->size = size;
 	ctx->frame_set.frame_objects[index]->offset = offset;
   ctx->frame_set.frame_objects[index]->stride = stride;
+
+	if (!_size)
+		_size = size;
+	if (!_stride)
+		_stride = stride;
+
 	pthread_mutex_unlock(&ctx->lock);
 
 }
@@ -425,7 +453,7 @@ static void wlr_frame_ready(void *data, struct zwlr_export_dmabuf_frame_v1 *fram
 		uint32_t tv_sec_hi, uint32_t tv_sec_lo, uint32_t tv_nsec) {
 
   struct screencast_context *ctx = data;
-	pthread_mutex_lock(&ctx->lock);
+	// pthread_mutex_lock(&ctx->lock);
   logger("wlr frame_ready\n");
 
 
@@ -436,6 +464,7 @@ static void wlr_frame_ready(void *data, struct zwlr_export_dmabuf_frame_v1 *fram
 	  pw_loop_signal_event(pw_main_loop_get_loop(ctx->loop), ctx->event);
 	wlr_register_cb(ctx);
 	}
+	// pthread_mutex_unlock(&ctx->lock);
 
 }
 
@@ -619,11 +648,16 @@ int main(int argc, char *argv[]) {
 	ctx.with_cursor = true;
 	ctx.hardware_device = HW_DEVICE;
 
+	_size = 0;
+	_stride = 0;
+
   printf("wl_display fd: %d\n", wl_display_get_fd(ctx.display));
 
 	pthread_mutex_init(&ctx.lock, NULL);
 
  	wlr_register_cb(&ctx);
+
+	 pw_setup(&ctx);
   
   pthread_create(&ctx.pw_thread, NULL, pw_start, &ctx);
 
